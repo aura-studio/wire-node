@@ -1,0 +1,26 @@
+{
+  "name": "@aura-studio/wire-node",
+  "version": "0.1.0",
+  "description": "Wrap a Node HTTP handler as an Aura Studio TunnelNode",
+  "main": "src/index.js",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/**/*.test.js"
+  },
+  "keywords": [
+    "aura-studio",
+    "wire",
+    "http",
+    "tunnel",
+    "node"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@aura-studio/tunnel-node": "file:../tunnel-node"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
