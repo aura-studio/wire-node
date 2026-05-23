@@ -13,6 +13,8 @@ class WireTunnel extends TunnelNode {
     this.app = app;
     this.handler = normalizeHTTPHandler(app);
     this.options = {
+      // Native req/res pass-through is the core wire model. Waiting for finish
+      // is kept so await tunnel.invoke(...) means the response lifecycle ended.
       waitForFinish: true,
       timeoutMs: 30000,
       ...options,
@@ -33,6 +35,8 @@ class WireTunnel extends TunnelNode {
   }
 
   async invoke(_route, exchange) {
+    // The route is ignored for wire mode because the HTTP request already
+    // carries method, url, headers, and body through Node's IncomingMessage.
     return this.handle(exchange);
   }
 
@@ -62,11 +66,18 @@ function loadTunnelNode() {
 }
 
 function normalizeHTTPHandler(app) {
+  // The smallest wire target is a plain Node HTTP handler: (req, res) => void.
   if (typeof app === "function") return app;
+
+  // These branches are compatibility adapters. They are not part of the
+  // req/res transport itself; they let common app objects expose one handler.
   if (app && typeof app.callback === "function") return app.callback();
   if (app && typeof app.handle === "function") {
     return (req, res, next) => app.handle(req, res, next);
   }
+
+  // A Node http.Server can be reused by emitting the same "request" event
+  // that http.createServer emits internally.
   if (isHTTPServer(app)) {
     return (req, res) => app.emit("request", req, res);
   }
@@ -99,6 +110,8 @@ function isHTTPServer(app) {
 }
 
 function normalizeExchange(exchange) {
+  // Wire mode intentionally does not serialize HTTP. It requires the caller to
+  // pass the live Node request/response pair from the same process.
   if (!exchange || typeof exchange !== "object") {
     throw new TypeError("wire tunnel invoke requires { req, res }");
   }
@@ -118,6 +131,8 @@ function normalizeExchange(exchange) {
 }
 
 function isHTTPIncomingMessage(req) {
+  // Use capability checks instead of instanceof so wrapped IncomingMessage
+  // objects and compatible framework requests can still pass.
   return (
     req &&
     typeof req.method === "string" &&
@@ -128,6 +143,8 @@ function isHTTPIncomingMessage(req) {
 }
 
 function isHTTPServerResponse(res) {
+  // ServerResponse-compatible objects need to be writable and observable. That
+  // is enough for Node handlers to set headers, end, and emit lifecycle events.
   return (
     res &&
     typeof res.setHeader === "function" &&
@@ -139,6 +156,8 @@ function isHTTPServerResponse(res) {
 async function callHTTPHandler(handler, req, res, next, options) {
   let nextError;
   const nextFn = (err) => {
+    // Express-style handlers report failures through next(err). Preserve that
+    // behavior while still surfacing the error from tunnel.invoke(...).
     if (typeof next === "function") {
       next(err);
     }
@@ -153,6 +172,9 @@ async function callHTTPHandler(handler, req, res, next, options) {
   }
   if (nextError) throw nextError;
 
+  // Some handlers finish synchronously, some finish after async stream work.
+  // This wait is optional because direct fire-and-forget forwarding can disable
+  // it with { waitForFinish: false }.
   if (options.waitForFinish && !res.writableEnded && !res.finished) {
     await waitForResponseFinish(res, options.timeoutMs);
   }
@@ -164,6 +186,8 @@ function waitForResponseFinish(res, timeoutMs) {
   if (res.writableEnded || res.finished) return Promise.resolve();
 
   return new Promise((resolve, reject) => {
+    // A timeout prevents a hung handler from leaving tunnel.invoke unresolved
+    // forever when it neither ends the response nor reports an error.
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("HTTP handler did not finish the response"));
