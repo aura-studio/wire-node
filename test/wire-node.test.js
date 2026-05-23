@@ -6,29 +6,30 @@ const test = require("node:test");
 
 const wire = require("../src");
 
-test("wire.new wraps a Node HTTP handler as TunnelNode", async () => {
+test("wire.new passes native req and res objects directly", async () => {
+  let seenReq;
+  let seenRes;
+
   const app = (req, res) => {
+    seenReq = req;
+    seenRes = res;
     res.statusCode = 201;
     res.setHeader("Content-Type", "text/plain");
-
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => {
-      res.end(`created ${req.method} ${req.url}: ${Buffer.concat(chunks).toString("utf8")}`);
-    });
+    res.end(`created ${req.method} ${req.url}`);
   };
 
   const tunnel = wire.new(app);
   assert.equal(wire.isTunnelNode(tunnel), true);
 
-  const rsp = await tunnel.invoke(
-    "/ignored",
-    "POST /echo?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello"
-  );
+  const result = await withServer((req, res) => tunnel.invoke("/ignored", { req, res }), {
+    method: "POST",
+    path: "/echo?x=1",
+  });
 
-  assert.match(rsp, /^HTTP\/1\.1 201 Created\r\n/);
-  assert.match(rsp, /Content-Type: text\/plain\r\n/);
-  assert.match(rsp, /\r\n\r\ncreated POST \/echo\?x=1: hello$/);
+  assert.equal(seenReq instanceof http.IncomingMessage, true);
+  assert.equal(seenRes instanceof http.ServerResponse, true);
+  assert.equal(result.statusCode, 201);
+  assert.equal(result.body, "created POST /echo?x=1");
 });
 
 test("wire.new accepts http.Server targets", async () => {
@@ -38,12 +39,12 @@ test("wire.new accepts http.Server targets", async () => {
   const server = http.createServer(app);
   const tunnel = wire.new(server);
 
-  const rsp = await tunnel.invoke(
-    "/ignored",
-    "GET /server HTTP/1.1\r\nHost: example.com\r\n\r\n"
-  );
+  const result = await withServer((req, res) => tunnel.invoke("/ignored", { req, res }), {
+    method: "GET",
+    path: "/server",
+  });
 
-  assert.match(rsp, /\r\n\r\nserver \/server$/);
+  assert.equal(result.body, "server /server");
 });
 
 test("wire.new rejects unsupported targets", () => {
@@ -52,30 +53,59 @@ test("wire.new rejects unsupported targets", () => {
   assert.throws(() => wire.new({ emit() {} }), /requires a Node HTTP handler/);
 });
 
-test("wire.new preserves binary request and response bodies with Buffer wire", async () => {
-  const requestBody = Buffer.from([0x00, 0xff, 0x41, 0x42]);
-  const responseBody = Buffer.from([0xff, 0x00, 0x43]);
+test("wire tunnel rejects invalid invoke payloads", async () => {
+  const tunnel = wire.new((_req, res) => res.end("ok"));
 
-  const app = (req, res) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => {
-      assert.deepEqual(Buffer.concat(chunks), requestBody);
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/octet-stream");
-      res.end(responseBody);
-    });
-  };
-
-  const tunnel = wire.new(app);
-  const head = Buffer.from(
-    "POST /bin HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\n",
-    "latin1"
+  await assert.rejects(
+    () => tunnel.invoke("/ignored", null),
+    /requires \{ req, res \}/
   );
-  const rsp = await tunnel.invoke("/ignored", Buffer.concat([head, requestBody]));
-
-  assert.equal(Buffer.isBuffer(rsp), true);
-  const separator = Buffer.from("\r\n\r\n", "latin1");
-  const body = rsp.subarray(rsp.indexOf(separator) + separator.length);
-  assert.deepEqual(body, responseBody);
+  await assert.rejects(
+    () => tunnel.invoke("/ignored", { req: {}, res: {} }),
+    /requires req to be an HTTP request object/
+  );
 });
+
+function withServer(handler, requestOptions) {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      Promise.resolve(handler(req, res)).catch((err) => {
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.end(String(err && err.message ? err.message : err));
+          return;
+        }
+        res.destroy(err);
+      });
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: address.port,
+          method: requestOptions.method || "GET",
+          path: requestOptions.path || "/",
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            server.close(() => {
+              resolve({
+                statusCode: res.statusCode,
+                headers: res.headers,
+                body: Buffer.concat(chunks).toString("utf8"),
+              });
+            });
+          });
+        }
+      );
+      req.on("error", (err) => {
+        server.close(() => reject(err));
+      });
+      req.end(requestOptions.body || "");
+    });
+  });
+}

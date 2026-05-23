@@ -1,9 +1,5 @@
 "use strict";
 
-const { EventEmitter } = require("node:events");
-const { Readable } = require("node:stream");
-const { STATUS_CODES } = require("node:http");
-
 const {
   TunnelNode,
   metaToString,
@@ -17,6 +13,7 @@ class WireTunnel extends TunnelNode {
     this.app = app;
     this.handler = normalizeHTTPHandler(app);
     this.options = {
+      waitForFinish: true,
       timeoutMs: 30000,
       ...options,
     };
@@ -35,187 +32,20 @@ class WireTunnel extends TunnelNode {
     return metaToString(meta);
   }
 
-  async invoke(_route, wireRequest) {
-    const parsed = parseWireRequest(wireRequest);
-    const req = new WireRequest(parsed);
-    const res = new WireResponse(req);
-
-    await invokeHTTPHandler(this.handler, req, res, this.options.timeoutMs);
-    if (Buffer.isBuffer(wireRequest) || wireRequest instanceof Uint8Array) {
-      return res.toWireBuffer();
-    }
-    return res.toWire();
-  }
-}
-
-class WireRequest extends Readable {
-  constructor(parsed) {
-    super();
-    this.method = parsed.method;
-    this.url = parsed.url;
-    this.originalUrl = parsed.url;
-    this.headers = parsed.headers;
-    this.rawHeaders = parsed.rawHeaders;
-    this.httpVersion = parsed.httpVersion;
-    this.httpVersionMajor = Number(parsed.httpVersion.split(".")[0]) || 1;
-    this.httpVersionMinor = Number(parsed.httpVersion.split(".")[1]) || 1;
-    this.socket = new EventEmitter();
-    this.socket.remoteAddress = "";
-    this.connection = this.socket;
-    this._body = parsed.body;
-    this._sent = false;
+  async invoke(_route, exchange) {
+    return this.handle(exchange);
   }
 
-  _read() {
-    if (this._sent) return;
-    this._sent = true;
-    if (this._body.length > 0) this.push(this._body);
-    this.push(null);
-  }
-
-  get(name) {
-    return this.headers[String(name).toLowerCase()];
-  }
-
-  header(name) {
-    return this.get(name);
-  }
-}
-
-class WireResponse extends EventEmitter {
-  constructor(req) {
-    super();
-    this.req = req;
-    this.statusCode = 200;
-    this.statusMessage = "";
-    this.headersSent = false;
-    this.writableEnded = false;
-    this.finished = false;
-    this.socket = req.socket;
-    this.locals = {};
-    this._headers = new Map();
-    this._headerNames = new Map();
-    this._chunks = [];
-
-    // Express replaces the response prototype. Keep the wire capture methods
-    // as own properties so they survive that prototype swap.
-    for (const name of [
-      "setHeader",
-      "getHeader",
-      "getHeaders",
-      "hasHeader",
-      "removeHeader",
-      "writeHead",
-      "flushHeaders",
-      "write",
-      "end",
-      "toWire",
-      "toWireBuffer",
-    ]) {
-      this[name] = this[name].bind(this);
-    }
-  }
-
-  setHeader(name, value) {
-    const key = normalizeHeaderName(name);
-    this._headers.set(key, value);
-    this._headerNames.set(key, String(name));
-    return this;
-  }
-
-  getHeader(name) {
-    return this._headers.get(normalizeHeaderName(name));
-  }
-
-  getHeaders() {
-    const headers = {};
-    for (const [key, value] of this._headers.entries()) {
-      headers[key] = value;
-    }
-    return headers;
-  }
-
-  hasHeader(name) {
-    return this._headers.has(normalizeHeaderName(name));
-  }
-
-  removeHeader(name) {
-    const key = normalizeHeaderName(name);
-    this._headers.delete(key);
-    this._headerNames.delete(key);
-  }
-
-  writeHead(statusCode, statusMessage, headers) {
-    this.statusCode = statusCode;
-    if (typeof statusMessage === "string") {
-      this.statusMessage = statusMessage;
-    } else {
-      headers = statusMessage;
-    }
-    if (headers && typeof headers === "object") {
-      for (const [name, value] of Object.entries(headers)) {
-        this.setHeader(name, value);
-      }
-    }
-    this.headersSent = true;
-    return this;
-  }
-
-  flushHeaders() {
-    this.headersSent = true;
-  }
-
-  write(chunk, encoding, callback) {
-    if (this.writableEnded) {
-      throw new Error("write after end");
-    }
-    this.headersSent = true;
-    if (chunk != null) {
-      this._chunks.push(toBuffer(chunk, encoding));
-    }
-    if (typeof callback === "function") callback();
-    return true;
-  }
-
-  end(chunk, encoding, callback) {
-    if (typeof encoding === "function") {
-      callback = encoding;
-      encoding = undefined;
-    }
-    if (chunk != null) this.write(chunk, encoding);
-    this.headersSent = true;
-    this.writableEnded = true;
-    this.finished = true;
-    if (typeof callback === "function") callback();
-    this.emit("finish");
-    this.emit("close");
-    return this;
-  }
-
-  toWire() {
-    return this.toWireBuffer().toString("utf8");
-  }
-
-  toWireBuffer() {
-    const body = Buffer.concat(this._chunks);
-    if (!this.hasHeader("Content-Length") && !this.hasHeader("Transfer-Encoding")) {
-      this.setHeader("Content-Length", String(body.length));
-    }
-
-    const reason = this.statusMessage || STATUS_CODES[this.statusCode] || "OK";
-    const lines = [`HTTP/1.1 ${this.statusCode} ${reason}`];
-
-    for (const [key, value] of this._headers.entries()) {
-      const name = this._headerNames.get(key) || key;
-      if (Array.isArray(value)) {
-        for (const item of value) lines.push(`${name}: ${item}`);
-      } else {
-        lines.push(`${name}: ${value}`);
-      }
-    }
-
-    const head = Buffer.from(`${lines.join("\r\n")}\r\n\r\n`, "latin1");
-    return Buffer.concat([head, body]);
+  async handle(exchange) {
+    const { req, res, next } = normalizeExchange(exchange);
+    const result = await callHTTPHandler(
+      this.handler,
+      req,
+      res,
+      next,
+      this.options
+    );
+    return result === undefined ? res : result;
   }
 }
 
@@ -268,82 +98,71 @@ function isHTTPServer(app) {
   );
 }
 
-function parseWireRequest(raw) {
-  const bytes = toWireInputBuffer(raw);
-  const split = splitHTTPWire(bytes);
-  const head = split.head.toString("latin1");
-  const lines = head.split(/\r?\n/).filter((line) => line.length > 0);
-  const requestLine = lines.shift() || "";
-  const match = requestLine.match(/^(\S+)\s+(\S+)\s+HTTP\/(\d+(?:\.\d+)?)$/i);
-  if (!match) {
-    throw new Error("invalid HTTP wire request");
+function normalizeExchange(exchange) {
+  if (!exchange || typeof exchange !== "object") {
+    throw new TypeError("wire tunnel invoke requires { req, res }");
   }
 
-  const headers = {};
-  const rawHeaders = [];
-  for (const line of lines) {
-    const colon = line.indexOf(":");
-    if (colon < 0) continue;
-    const name = line.slice(0, colon).trim();
-    const value = line.slice(colon + 1).trim();
-    headers[name.toLowerCase()] = value;
-    rawHeaders.push(name, value);
+  const req = exchange.req || exchange.request;
+  const res = exchange.res || exchange.response;
+  const next = typeof exchange.next === "function" ? exchange.next : undefined;
+
+  if (!isHTTPIncomingMessage(req)) {
+    throw new TypeError("wire tunnel invoke requires req to be an HTTP request object");
+  }
+  if (!isHTTPServerResponse(res)) {
+    throw new TypeError("wire tunnel invoke requires res to be an HTTP response object");
   }
 
-  return {
-    method: match[1].toUpperCase(),
-    url: match[2],
-    httpVersion: match[3],
-    headers,
-    rawHeaders,
-    body: split.body,
-  };
+  return { req, res, next };
 }
 
-function toWireInputBuffer(raw) {
-  if (Buffer.isBuffer(raw)) return raw;
-  if (raw instanceof Uint8Array) return Buffer.from(raw);
-  return Buffer.from(String(raw || ""), "utf8");
+function isHTTPIncomingMessage(req) {
+  return (
+    req &&
+    typeof req.method === "string" &&
+    typeof req.url === "string" &&
+    typeof req.headers === "object" &&
+    typeof req.on === "function"
+  );
 }
 
-function splitHTTPWire(bytes) {
-  const crlf = Buffer.from("\r\n\r\n", "latin1");
-  const lf = Buffer.from("\n\n", "latin1");
-  let idx = bytes.indexOf(crlf);
-  let sepLen = crlf.length;
-  if (idx < 0) {
-    idx = bytes.indexOf(lf);
-    sepLen = lf.length;
-  }
-  if (idx < 0) {
-    return { head: bytes, body: Buffer.alloc(0) };
-  }
-  return {
-    head: bytes.subarray(0, idx),
-    body: bytes.subarray(idx + sepLen),
-  };
+function isHTTPServerResponse(res) {
+  return (
+    res &&
+    typeof res.setHeader === "function" &&
+    typeof res.end === "function" &&
+    typeof res.on === "function"
+  );
 }
 
-async function invokeHTTPHandler(handler, req, res, timeoutMs) {
-  let handlerResult;
-  let handlerError;
-
-  const next = (err) => {
-    if (err) handlerError = err;
+async function callHTTPHandler(handler, req, res, next, options) {
+  let nextError;
+  const nextFn = (err) => {
+    if (typeof next === "function") {
+      next(err);
+    }
+    if (err) {
+      nextError = err;
+    }
   };
 
-  handlerResult = handler(req, res, next);
-  if (handlerResult && typeof handlerResult.then === "function") {
-    await handlerResult;
+  const result = handler(req, res, nextFn);
+  if (result && typeof result.then === "function") {
+    await result;
   }
-  if (handlerError) throw handlerError;
-  if (!res.writableEnded) {
-    await waitForFinish(res, timeoutMs);
+  if (nextError) throw nextError;
+
+  if (options.waitForFinish && !res.writableEnded && !res.finished) {
+    await waitForResponseFinish(res, options.timeoutMs);
   }
+
+  return result;
 }
 
-function waitForFinish(res, timeoutMs) {
-  if (res.writableEnded) return Promise.resolve();
+function waitForResponseFinish(res, timeoutMs) {
+  if (res.writableEnded || res.finished) return Promise.resolve();
+
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
@@ -381,22 +200,10 @@ async function callOptional(target, names) {
   return "";
 }
 
-function normalizeHeaderName(name) {
-  return String(name).toLowerCase();
-}
-
-function toBuffer(chunk, encoding) {
-  if (Buffer.isBuffer(chunk)) return chunk;
-  return Buffer.from(String(chunk), encoding || "utf8");
-}
-
 module.exports = {
   new: createWire,
   create: createWire,
   Wire: WireTunnel,
   WireTunnel,
-  WireRequest,
-  WireResponse,
-  parseWireRequest,
   isTunnelNode,
 };

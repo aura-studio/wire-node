@@ -9,26 +9,26 @@ const app = (req, res) => {
   res.end(`hello from ${req.url}`);
 };
 
-async function runTunnelExample() {
+async function main() {
   const tunnel = wire.new(app);
-  const response = await tunnel.invoke(
-    "/ignored",
-    "GET /hello HTTP/1.1\r\nHost: example.com\r\n\r\n"
-  );
 
-  console.log(response);
-}
+  const server = http.createServer((req, res) => {
+    tunnel.invoke("/ignored", { req, res }).catch((err) => {
+      console.error(err);
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end("Internal Server Error");
+      }
+    });
+  });
 
-function serveHTTP() {
-  const server = http.createServer(app);
   server.listen(3000, "127.0.0.1", () => {
     console.log("listening on http://127.0.0.1:3000");
+    console.log("try: curl http://127.0.0.1:3000/hello");
   });
 }
 
-const main = process.argv.includes("--serve") ? serveHTTP : runTunnelExample;
-
-Promise.resolve(main()).catch((err) => {
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
