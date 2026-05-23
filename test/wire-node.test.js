@@ -51,3 +51,31 @@ test("wire.new rejects unsupported targets", () => {
   assert.throws(() => wire.new({}), /requires a Node HTTP handler/);
   assert.throws(() => wire.new({ emit() {} }), /requires a Node HTTP handler/);
 });
+
+test("wire.new preserves binary request and response bodies with Buffer wire", async () => {
+  const requestBody = Buffer.from([0x00, 0xff, 0x41, 0x42]);
+  const responseBody = Buffer.from([0xff, 0x00, 0x43]);
+
+  const app = (req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      assert.deepEqual(Buffer.concat(chunks), requestBody);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.end(responseBody);
+    });
+  };
+
+  const tunnel = wire.new(app);
+  const head = Buffer.from(
+    "POST /bin HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\n",
+    "latin1"
+  );
+  const rsp = await tunnel.invoke("/ignored", Buffer.concat([head, requestBody]));
+
+  assert.equal(Buffer.isBuffer(rsp), true);
+  const separator = Buffer.from("\r\n\r\n", "latin1");
+  const body = rsp.subarray(rsp.indexOf(separator) + separator.length);
+  assert.deepEqual(body, responseBody);
+});

@@ -41,6 +41,9 @@ class WireTunnel extends TunnelNode {
     const res = new WireResponse(req);
 
     await invokeHTTPHandler(this.handler, req, res, this.options.timeoutMs);
+    if (Buffer.isBuffer(wireRequest) || wireRequest instanceof Uint8Array) {
+      return res.toWireBuffer();
+    }
     return res.toWire();
   }
 }
@@ -107,6 +110,7 @@ class WireResponse extends EventEmitter {
       "write",
       "end",
       "toWire",
+      "toWireBuffer",
     ]) {
       this[name] = this[name].bind(this);
     }
@@ -189,6 +193,10 @@ class WireResponse extends EventEmitter {
   }
 
   toWire() {
+    return this.toWireBuffer().toString("utf8");
+  }
+
+  toWireBuffer() {
     const body = Buffer.concat(this._chunks);
     if (!this.hasHeader("Content-Length") && !this.hasHeader("Transfer-Encoding")) {
       this.setHeader("Content-Length", String(body.length));
@@ -206,7 +214,8 @@ class WireResponse extends EventEmitter {
       }
     }
 
-    return `${lines.join("\r\n")}\r\n\r\n${body.toString("utf8")}`;
+    const head = Buffer.from(`${lines.join("\r\n")}\r\n\r\n`, "latin1");
+    return Buffer.concat([head, body]);
   }
 }
 
@@ -260,11 +269,9 @@ function isHTTPServer(app) {
 }
 
 function parseWireRequest(raw) {
-  const text = String(raw || "");
-  const separator = text.includes("\r\n\r\n") ? "\r\n\r\n" : "\n\n";
-  const idx = text.indexOf(separator);
-  const head = idx >= 0 ? text.slice(0, idx) : text;
-  const bodyText = idx >= 0 ? text.slice(idx + separator.length) : "";
+  const bytes = toWireInputBuffer(raw);
+  const split = splitHTTPWire(bytes);
+  const head = split.head.toString("latin1");
   const lines = head.split(/\r?\n/).filter((line) => line.length > 0);
   const requestLine = lines.shift() || "";
   const match = requestLine.match(/^(\S+)\s+(\S+)\s+HTTP\/(\d+(?:\.\d+)?)$/i);
@@ -289,7 +296,31 @@ function parseWireRequest(raw) {
     httpVersion: match[3],
     headers,
     rawHeaders,
-    body: Buffer.from(bodyText, "utf8"),
+    body: split.body,
+  };
+}
+
+function toWireInputBuffer(raw) {
+  if (Buffer.isBuffer(raw)) return raw;
+  if (raw instanceof Uint8Array) return Buffer.from(raw);
+  return Buffer.from(String(raw || ""), "utf8");
+}
+
+function splitHTTPWire(bytes) {
+  const crlf = Buffer.from("\r\n\r\n", "latin1");
+  const lf = Buffer.from("\n\n", "latin1");
+  let idx = bytes.indexOf(crlf);
+  let sepLen = crlf.length;
+  if (idx < 0) {
+    idx = bytes.indexOf(lf);
+    sepLen = lf.length;
+  }
+  if (idx < 0) {
+    return { head: bytes, body: Buffer.alloc(0) };
+  }
+  return {
+    head: bytes.subarray(0, idx),
+    body: bytes.subarray(idx + sepLen),
   };
 }
 
