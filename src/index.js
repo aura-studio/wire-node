@@ -36,6 +36,7 @@ class WireTunnel extends TunnelNode {
     assertWireTarget(app);
     this.app = app;
     this.handler = normalizeHTTPHandler(app);
+    this.lifecycleTarget = shouldUseLifecycleTarget(app) ? app : null;
     this.options = {
       // Native req/res pass-through is the core wire model. Waiting for finish
       // is kept so await tunnel.invoke(...) means the response lifecycle ended.
@@ -46,15 +47,15 @@ class WireTunnel extends TunnelNode {
   }
 
   async init() {
-    await callOptional(this.app, ["init", "Init"]);
+    await callOptional(this.lifecycleTarget, ["init", "Init"]);
   }
 
   async close() {
-    await callOptional(this.app, ["close", "Close"]);
+    await callOptional(this.lifecycleTarget, ["close", "Close"]);
   }
 
   async meta() {
-    const meta = await callOptional(this.app, ["meta", "Meta"]);
+    const meta = await callOptional(this.lifecycleTarget, ["meta", "Meta"]);
     return metaToString(meta);
   }
 
@@ -79,6 +80,18 @@ class WireTunnel extends TunnelNode {
 
 function createWire(app, options) {
   return new WireTunnel(app, options);
+}
+
+function shouldUseLifecycleTarget(app) {
+  // Express/Koa/http.Server expose methods such as init/close for their own
+  // internals. Wire mode should forward req/res without invoking those
+  // framework lifecycle hooks.
+  return !(
+    app &&
+    (typeof app.handle === "function" ||
+      typeof app.callback === "function" ||
+      isHTTPServer(app))
+  );
 }
 
 function normalizeHTTPHandler(app) {

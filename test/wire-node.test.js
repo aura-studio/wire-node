@@ -47,6 +47,26 @@ test("wire.new accepts http.Server targets", async () => {
   assert.equal(result.body, "server /server");
 });
 
+test("wire.new does not call framework app lifecycle methods", async () => {
+  const app = (req, res) => {
+    res.end("ok");
+  };
+  app.handle = app;
+  app.init = () => {
+    throw new Error("framework init should not be called");
+  };
+
+  const tunnel = wire.new(app);
+  await tunnel.init();
+
+  const result = await withServer((req, res) => tunnel.invoke("/ignored", { req, res }), {
+    method: "GET",
+    path: "/framework",
+  });
+
+  assert.equal(result.body, "ok");
+});
+
 test("wire.new rejects unsupported targets", () => {
   assert.throws(() => wire.new(null), /requires a Node HTTP handler/);
   assert.throws(() => wire.new({}), /requires a Node HTTP handler/);
