@@ -1,6 +1,6 @@
 {
   "name": "@aura-studio/wire-node",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Wrap a Node HTTP handler as an Aura Studio TunnelNode",
   "main": "src/index.js",
   "files": [
