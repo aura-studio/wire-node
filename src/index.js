@@ -1,10 +1,34 @@
 "use strict";
 
-const {
-  TunnelNode,
-  metaToString,
-  isTunnelNode,
-} = loadTunnelNode();
+class TunnelNode {
+  async init() {}
+
+  async invoke() {
+    throw new Error("TunnelNode.invoke must be implemented");
+  }
+
+  async meta() {
+    return "";
+  }
+
+  async close() {}
+
+  Init() {
+    return this.init();
+  }
+
+  Invoke(route, request) {
+    return this.invoke(route, request);
+  }
+
+  Meta() {
+    return Promise.resolve(this.meta()).then(metaToString);
+  }
+
+  Close() {
+    return this.close();
+  }
+}
 
 class WireTunnel extends TunnelNode {
   constructor(app, options = {}) {
@@ -55,14 +79,6 @@ class WireTunnel extends TunnelNode {
 
 function createWire(app, options) {
   return new WireTunnel(app, options);
-}
-
-function loadTunnelNode() {
-  try {
-    return require("@aura-studio/tunnel-node");
-  } catch (_) {
-    return require("../../tunnel-node/src");
-  }
 }
 
 function normalizeHTTPHandler(app) {
@@ -224,10 +240,29 @@ async function callOptional(target, names) {
   return "";
 }
 
+function metaToString(meta) {
+  if (meta == null) return "";
+  if (typeof meta === "string") return meta;
+  if (Buffer.isBuffer(meta)) return meta.toString("utf8");
+  return JSON.stringify(meta, null, 2);
+}
+
+function isTunnelNode(value) {
+  const lower = ["init", "invoke", "close"].every(
+    (name) => typeof value?.[name] === "function"
+  );
+  const upper = ["Init", "Invoke", "Close"].every(
+    (name) => typeof value?.[name] === "function"
+  );
+  return lower || upper;
+}
+
 module.exports = {
   new: createWire,
   create: createWire,
   Wire: WireTunnel,
   WireTunnel,
+  TunnelNode,
+  metaToString,
   isTunnelNode,
 };

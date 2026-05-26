@@ -17,9 +17,6 @@
     "node"
   ],
   "license": "MIT",
-  "dependencies": {
-    "@aura-studio/tunnel-node": "file:../tunnel-node"
-  },
   "engines": {
     "node": ">=18.0.0"
   }
